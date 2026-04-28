@@ -562,7 +562,7 @@ function updatePlayerSetup() {
     const container = document.getElementById('playersSetup');
     container.innerHTML = '';
     
-    const tokens = ['🎓', '📚', '💻', '📝', '🧮', '✏️', '🎒','🛜', '☕'];
+    const tokens = ['🎓', '📚', '💻', '📝', '🧮', '✏️', '🎒', '☕'];
     
     for (let i = 1; i <= count; i++) {
         const playerDiv = document.createElement('div');
@@ -595,7 +595,6 @@ function updatePlayerSetup() {
                         <option value="✏️">✏️ Карандаш</option>
                         <option value="🎒">🎒 Рюкзак</option>
                         <option value="☕">☕ Кофе</option>
-                        <option value="🛜">🛜 Роутер</option>
                     </select>
                 </div>
             </div>
@@ -710,7 +709,7 @@ function showSpaceDescription(space) {
         1: "Кабинет экономики: место, где учат считать деньги. Отличная точка для старта твоей финансовой империи.",
         2: "Кабинет английского: international vibe, быстрый актив для первых ходов.",
         5: "Кабинет черчения: для тех, кто любит точность, линии и уверенный доход.",
-        6: "IT кабинет: звучит солидно, а приносит стабильную ренту.",
+        6: "Кредисманский проспект: звучит солидно, а приносит стабильную ренту.",
         7: "Комната отдыха: chill-зона кампуса, но для соперников это платная остановка.",
         8: "Аудитория экономики: еще один денежный хаб для твоего портфеля.",
         10: "Кабинет архитектуры: стиль, проекты и серьезный актив в коллекцию.",
@@ -1349,6 +1348,13 @@ function buyProperty(player, spaceId) {
 function getPlayerColor(playerId) {
     const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#f9ca24', '#6c5ce7', '#a29bfe'];
     return colors[(playerId - 1) % colors.length];
+}
+
+// Add method to MonopolyGame class for accessing from inline handlers
+if (typeof MonopolyGame !== 'undefined' && MonopolyGame.prototype) {
+    MonopolyGame.prototype.getPlayerColor = function(playerId) {
+        return getPlayerColor(playerId);
+    };
 }
 
 // ===== Показ карточки (улучшенная версия) =====
