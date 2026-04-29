@@ -18,6 +18,160 @@ const BOARD_PATH = [
     17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28
 ];
 const BOARD_SIZE = BOARD_PATH.length;
+const networkState = {
+    enabled: false,
+    roomCode: null,
+    playerName: null,
+    playerToken: null,
+    playerId: null,
+    isHost: false,
+    players: [],
+    applyingRemote: false,
+    lastRemoteUpdatedAt: null
+};
+
+function renderNetworkPlayersSetup(players) {
+    const container = document.getElementById('playersSetup');
+    if (!container) return;
+    container.innerHTML = players
+        .map((player, index) => `
+            <div class="player-setup-item">
+                <h4>Игрок ${index + 1}</h4>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Никнейм:</label>
+                        <input type="text" value="${escapeHtml(player.name)}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Фигурка:</label>
+                        <input type="text" value="${escapeHtml(player.token || '🎓')}" readonly>
+                    </div>
+                </div>
+            </div>
+        `)
+        .join('');
+}
+
+async function fetchRoomSnapshot() {
+    if (!networkState.enabled || !networkState.roomCode) return null;
+    const response = await fetch(`/api/rooms/${networkState.roomCode}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Ошибка загрузки комнаты');
+    return data;
+}
+
+function applyRemoteGameState(remoteState) {
+    networkState.applyingRemote = true;
+    Object.assign(gameState, remoteState);
+    updatePlayerInfo();
+    updatePlayerPositions();
+    updateTurnIndicator();
+    document.getElementById('setupScreen').style.display = 'none';
+    gameState.gameStarted = true;
+    networkState.applyingRemote = false;
+}
+
+function getLocalPlayerIndex() {
+    if (!networkState.enabled) return gameState.currentPlayer;
+
+    if (networkState.playerId) {
+        const byId = gameState.players.findIndex((player) => Number(player.id) === Number(networkState.playerId));
+        if (byId >= 0) return byId;
+    }
+
+    return gameState.players.findIndex((player) =>
+        player.name === networkState.playerName && player.token === networkState.playerToken
+    );
+}
+
+function ensureLocalTurn(actionLabel) {
+    if (!networkState.enabled) return true;
+    const localIndex = getLocalPlayerIndex();
+    if (localIndex < 0) {
+        showToast("Локальный игрок не найден в комнате", 'error', 1400);
+        return false;
+    }
+    if (localIndex !== gameState.currentPlayer) {
+        const current = gameState.players[gameState.currentPlayer];
+        showToast(`Сейчас ходит ${current?.name || 'другой игрок'}. ${actionLabel} недоступно`, 'warning', 1500);
+        return false;
+    }
+    return true;
+}
+
+async function syncGameState(eventText = '') {
+    if (!networkState.enabled || !gameState.gameStarted || networkState.applyingRemote) return;
+    try {
+        await fetch(`/api/rooms/${networkState.roomCode}/state`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ state: gameState, eventText })
+        });
+    } catch (_error) {
+        // Сетевые ошибки не ломают локальный ход.
+    }
+}
+
+async function pollRemoteState() {
+    if (!networkState.enabled) return;
+    try {
+        const snapshot = await fetchRoomSnapshot();
+        if (!snapshot) return;
+        networkState.players = snapshot.players || [];
+        if (!gameState.gameStarted && networkState.players.length) {
+            renderNetworkPlayersSetup(networkState.players);
+        }
+
+        if (
+            snapshot.gameState &&
+            snapshot.gameStateUpdatedAt &&
+            snapshot.gameStateUpdatedAt !== networkState.lastRemoteUpdatedAt
+        ) {
+            networkState.lastRemoteUpdatedAt = snapshot.gameStateUpdatedAt;
+            applyRemoteGameState(snapshot.gameState);
+            showToast(`Состояние комнаты ${networkState.roomCode} обновлено`, 'info', 1200);
+        }
+    } catch (_error) {
+        // Молчаливая деградация: игра продолжает работать локально.
+    }
+}
+
+async function initNetworkMode() {
+    const roomCode = sessionStorage.getItem('monopolyATST_roomCode');
+    if (!roomCode) return;
+
+    networkState.enabled = true;
+    networkState.roomCode = roomCode.toUpperCase();
+    networkState.playerName = sessionStorage.getItem('monopolyATST_playerName') || 'Игрок';
+    networkState.playerToken = sessionStorage.getItem('monopolyATST_playerToken') || '🎓';
+    networkState.playerId = Number(sessionStorage.getItem('monopolyATST_playerId') || 0) || null;
+    networkState.isHost = sessionStorage.getItem('monopolyATST_isHost') === '1';
+
+    const gameMessage = document.getElementById('gameMessage');
+    if (gameMessage) {
+        gameMessage.textContent = `Сетевая комната: ${networkState.roomCode} (${networkState.isHost ? 'хост' : 'участник'})`;
+    }
+
+    try {
+        const snapshot = await fetchRoomSnapshot();
+        networkState.players = snapshot.players || [];
+        if (networkState.players.length) {
+            renderNetworkPlayersSetup(networkState.players);
+            const countSelect = document.getElementById('playerCount');
+            if (countSelect) {
+                countSelect.value = String(Math.min(8, networkState.players.length));
+                countSelect.disabled = true;
+            }
+        }
+        if (!networkState.isHost && snapshot.gameState) {
+            networkState.lastRemoteUpdatedAt = snapshot.gameStateUpdatedAt;
+            applyRemoteGameState(snapshot.gameState);
+            addEventLog(`Подключение к комнате ${networkState.roomCode} выполнено.`);
+        }
+    } catch (error) {
+        showToast(`Сетевая ошибка: ${error.message}`, 'error', 3000);
+    }
+}
 
 function getTrackIndex(position) {
     const index = BOARD_PATH.indexOf(position);
@@ -462,28 +616,48 @@ function togglePlayerName(num, isHuman) {
 
 // ===== Начало игры =====
 function startGame() {
-    const count = parseInt(document.getElementById('playerCount').value);
     gameState.players = [];
-    
-    for (let i = 1; i <= count; i++) {
-        const type = document.querySelector(`input[name="player${i}Type"]:checked`).value;
-        const name = document.getElementById(`player${i}Name`).value;
-        const token = document.getElementById(`player${i}Token`).value;
-        
-        gameState.players.push({
-            id: i,
-            name: name,
-            token: token,
-            type: type,
-            money: 1500,
-            position: 0,
-            properties: [],
-            skipTurn: false,
-            skipTurns: 0,
-            extraTurn: false,
-            bankrupt: false,
-            consecutiveDoubles: 0
+    gameState.currentPlayer = 0;
+
+    if (networkState.enabled && networkState.players.length > 0) {
+        networkState.players.forEach((player, index) => {
+            gameState.players.push({
+                id: player.id,
+                name: player.name,
+                token: player.token || '🎓',
+                type: 'human',
+                money: 1500,
+                position: 0,
+                properties: [],
+                skipTurn: false,
+                skipTurns: 0,
+                extraTurn: false,
+                bankrupt: false,
+                consecutiveDoubles: 0
+            });
         });
+    } else {
+        const count = parseInt(document.getElementById('playerCount').value);
+        for (let i = 1; i <= count; i++) {
+            const type = document.querySelector(`input[name="player${i}Type"]:checked`).value;
+            const name = document.getElementById(`player${i}Name`).value;
+            const token = document.getElementById(`player${i}Token`).value;
+            
+            gameState.players.push({
+                id: i,
+                name: name,
+                token: token,
+                type: type,
+                money: 1500,
+                position: 0,
+                properties: [],
+                skipTurn: false,
+                skipTurns: 0,
+                extraTurn: false,
+                bankrupt: false,
+                consecutiveDoubles: 0
+            });
+        }
     }
     
     initializeBoard();
@@ -500,6 +674,10 @@ function startGame() {
     
     if (gameState.players[0].type === 'ai') {
         setTimeout(aiTurn, 1500);
+    }
+
+    if (networkState.enabled) {
+        syncGameState(`Игра в комнате ${networkState.roomCode} запущена`);
     }
 }
 
@@ -682,6 +860,8 @@ function updateTurnIndicator() {
 
 // ===== Бросок 3D кубиков с проверкой дублей =====
 function rollDice() {
+    if (!ensureLocalTurn("Бросок кубиков")) return;
+
     if (gameState.awaitingPurchaseDecision) {
         showToast("Сначала завершите покупку текущей клетки", 'info', 1200);
         return;
@@ -1170,6 +1350,13 @@ function getPlayerColor(playerId) {
     return colors[(playerId - 1) % colors.length];
 }
 
+// Add method to MonopolyGame class for accessing from inline handlers
+if (typeof MonopolyGame !== 'undefined' && MonopolyGame.prototype) {
+    MonopolyGame.prototype.getPlayerColor = function(playerId) {
+        return getPlayerColor(playerId);
+    };
+}
+
 // ===== Показ карточки (улучшенная версия) =====
 function showCard(title, text) {
     const modal = document.getElementById('cardModal');
@@ -1224,6 +1411,8 @@ function closeCard() {
 
 // ===== Завершение хода =====
 function endTurn() {
+    if (!ensureLocalTurn("Завершение хода")) return;
+
     const player = gameState.players[gameState.currentPlayer];
     
     player.consecutiveDoubles = 0;
@@ -1284,6 +1473,10 @@ function endTurn() {
     
     if (gameState.players[gameState.currentPlayer].type === 'ai') {
         setTimeout(aiTurn, 1500);
+    }
+
+    if (networkState.enabled) {
+        syncGameState(`Ход передан игроку ${gameState.players[gameState.currentPlayer].name}`);
     }
 }
 
@@ -1348,6 +1541,9 @@ function loadGame() {
             updateTurnIndicator();
             gameState.gameStarted = true;
             addEventLog("Сохранение успешно загружено.");
+            if (networkState.enabled) {
+                syncGameState("Состояние загружено из локального сохранения");
+            }
         } else {
             showToast('Нет сохранённой игры', 'error');
         }
@@ -1357,11 +1553,12 @@ function loadGame() {
 }
 
 // ===== Инициализация при загрузке =====
-window.onload = function() {
+window.onload = async function() {
     initializeBoard();
     updatePlayerSetup();
     renderEventLog();
     renderJournalModal();
+    await initNetworkMode();
     const tutorialCompleted = localStorage.getItem('monopolyATST_tutorial');
     if (!tutorialCompleted) {
         setTimeout(showTutorial, 1000);
@@ -1386,5 +1583,11 @@ window.onload = function() {
                 closeJournalModal();
             }
         });
+    }
+
+    if (networkState.enabled) {
+        setInterval(() => {
+            pollRemoteState();
+        }, 2500);
     }
 };
